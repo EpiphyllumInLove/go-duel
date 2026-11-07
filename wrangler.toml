@@ -1,0 +1,25 @@
+name = "go-duel"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+
+[observability]
+enabled = true
+
+# 前端静态资产：public/ 目录由 Workers Assets 托管
+# 注意：不要开 not_found_handling = "single-page-application"，
+# 否则未匹配的路径会被 index.html 接管，可能吞掉 /ws 与 /health。
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+# Durable Object：每个 roomCode 一个实例
+[[durable_objects.bindings]]
+name = "GAME_ROOM"
+class_name = "GameRoom"
+
+# 首次部署使用 v1
+# new_sqlite_classes：免费计划的 SQLite 后端 DO（推荐）
+# 若你的 wrangler/账号要求经典 DO，把 new_sqlite_classes 换成 new_classes
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["GameRoom"]

@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Go Duel · Cloudflare 双人围棋</title>
+    <style>
+      :root {
+        --bg: #14161a;
+        --panel: #1e2228;
+        --line: #2c323b;
+        --text: #e8eaed;
+        --muted: #9aa3af;
+        --accent: #4f9cf9;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif;
+        line-height: 1.65;
+      }
+      .wrap { max-width: 780px; margin: 0 auto; padding: 28px 18px 60px; }
+      header { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
+      .logo {
+        width: 40px; height: 40px; border-radius: 10px; flex: 0 0 auto;
+        background: radial-gradient(circle at 35% 32%, #5f5f5f 0 28%, #050505 70%);
+        border: 1px solid #3a3a3a;
+      }
+      h1 { font-size: 22px; margin: 0; letter-spacing: 0.4px; }
+      .tagline { color: var(--muted); font-size: 13px; margin: 0 0 22px; }
+      .card {
+        background: var(--panel); border: 1px solid var(--line);
+        border-radius: 12px; padding: 18px; margin-bottom: 14px;
+      }
+      h2 { font-size: 15px; margin: 0 0 10px; color: var(--accent); }
+      p, li { font-size: 14px; color: #cbd2da; }
+      ul { margin: 8px 0 0; padding-left: 20px; }
+      code {
+        background: #12151a; border: 1px solid var(--line); border-radius: 5px;
+        padding: 1px 6px; font-size: 12.5px; color: #a8d1ff;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      pre {
+        background: #12151a; border: 1px solid var(--line); border-radius: 10px;
+        padding: 14px; overflow-x: auto; font-size: 12.5px; line-height: 1.7;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #cbd2da;
+      }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
+      .item {
+        background: #171a20; border: 1px solid var(--line); border-radius: 10px;
+        padding: 12px; font-size: 13px;
+      }
+      .item b { display: block; color: var(--text); margin-bottom: 3px; font-weight: 600; }
+      .item span { color: var(--muted); font-size: 12.5px; }
+      .note {
+        border-left: 3px solid var(--accent); background: #172130;
+        padding: 10px 14px; border-radius: 6px; font-size: 13px; color: #cbd2da;
+      }
+      footer { color: #6c757f; font-size: 12px; text-align: center; margin-top: 26px; }
+      .pill {
+        display: inline-block; font-size: 11.5px; color: #06121f; background: var(--accent);
+        border-radius: 999px; padding: 2px 9px; margin-right: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <div class="logo"></div>
+        <div>
+          <h1>Go Duel</h1>
+          <p class="tagline">Cloudflare Workers + Durable Objects 实时双人围棋</p>
+        </div>
+      </header>
+
+      <div class="card">
+        <h2>这是什么</h2>
+        <p style="margin: 0">
+          一个可直接部署到 Cloudflare 的实时围棋对战项目：创建 6 位房间码 → 把链接发给朋友 →
+          两人打开网页即可落子。零数据库、零账号，每个房间由一个 Durable Object 实例托管状态。
+        </p>
+        <p style="margin: 10px 0 0">
+          <span class="pill">Workers</span>
+          <span class="pill">Durable Objects</span>
+          <span class="pill">WebSocket Hibernation</span>
+          <span class="pill">Workers Assets</span>
+        </p>
+      </div>
+
+      <div class="card">
+        <h2>目录结构</h2>
+        <div class="grid">
+          <div class="item"><b>src/index.ts</b><span>Worker 路由：/ws → DO，其余 → 静态资产</span></div>
+          <div class="item"><b>src/game-room.ts</b><span>GameRoom DO：状态机、校验、持久化、广播</span></div>
+          <div class="item"><b>src/shared/go.ts</b><span>规则引擎：气、提子、自杀、劫、数子法</span></div>
+          <div class="item"><b>src/shared/types.ts</b><span>消息协议与房间状态类型</span></div>
+          <div class="item"><b>public/index.html</b><span>单页前端（Canvas 棋盘，无构建）</span></div>
+          <div class="item"><b>public/app.js</b><span>WebSocket 客户端与渲染</span></div>
+          <div class="item"><b>tests/go.test.ts</b><span>规则引擎测试用例</span></div>
+          <div class="item"><b>README.md</b><span>部署步骤、协议说明、改路数方法</span></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>本地运行</h2>
+        <pre>npm install
+npx wrangler dev        # 打开 http://localhost:8787</pre>
+        <div class="note">
+          注意：必须通过 <code>wrangler dev</code> 启动后再访问，直接双击打开
+          <code>public/index.html</code> 是 <code>file://</code> 协议，无法连接 <code>/ws</code>。
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>部署</h2>
+        <pre>npx wrangler login
+npx wrangler deploy     # 输出 https://go-duel.&lt;子域&gt;.workers.dev</pre>
+        <p style="margin: 8px 0 0">
+          把 <code>https://你的域名/?room=ABC123</code> 发给朋友即可开战。
+        </p>
+      </div>
+
+      <div class="card">
+        <h2>规则范围</h2>
+        <ul>
+          <li>黑先交替落子；不能下在已有棋子处、不能自杀、简单劫禁止立即回提</li>
+          <li>自动提掉对方无气棋块；支持 Pass，连续两次 Pass 终局</li>
+          <li>终局按简化中国规则数子法计分（盘面棋子 + 单色围空），白方贴目默认 7.5</li>
+          <li>默认 19 路，改 <code>DEFAULT_BOARD_SIZE</code> 一行即可切到 9 或 13 路</li>
+        </ul>
+      </div>
+
+      <footer>
+        详细说明见 <code>README.md</code> · 本页面仅为工作区导航，不参与部署
+      </footer>
+    </div>
+  </body>
+</html>

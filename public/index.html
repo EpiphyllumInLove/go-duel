@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#14161a" />
+    <title>Go Duel · 双人围棋</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="topbar">
+        <h1>Go Duel<span class="sub">双人围棋</span></h1>
+        <span id="conn-label" class="conn off">离线</span>
+      </header>
+
+      <!-- 大厅 -->
+      <section id="lobby" class="card lobby hidden">
+        <p class="hint">
+          创建一个房间，把链接发给朋友，两人打开网页即可实时对弈。<br />
+          无需注册，刷新页面自动重连。
+        </p>
+        <button id="btn-create" class="primary">创建房间</button>
+        <div class="divider"><span>或</span></div>
+        <input
+          id="room-input"
+          inputmode="latin"
+          placeholder="输入 6 位房间码"
+          maxlength="6"
+          autocomplete="off"
+          autocapitalize="characters"
+          spellcheck="false"
+        />
+        <button id="btn-join">加入房间</button>
+        <p id="lobby-error" class="error"></p>
+      </section>
+
+      <!-- 对局 -->
+      <section id="game" class="game hidden">
+        <div class="room-row">
+          <div class="room-code">房间 <strong id="room-code">------</strong></div>
+          <button id="btn-copy" class="small">复制链接</button>
+          <button id="btn-leave" class="small ghost">离开</button>
+        </div>
+
+        <div class="board-wrap">
+          <canvas id="canvas"></canvas>
+          <div id="board-overlay" class="board-overlay hidden"></div>
+        </div>
+
+        <div class="panels">
+          <div class="turn" id="turn-label">连接中…</div>
+
+          <div class="players">
+            <div class="seat" id="seat-black">
+              <span class="stone-dot black"></span>
+              <span class="seat-name">黑棋</span>
+              <span id="black-status" class="seat-status">未加入</span>
+              <span id="black-you" class="you-tag hidden">你</span>
+            </div>
+            <div class="seat" id="seat-white">
+              <span class="stone-dot white"></span>
+              <span class="seat-name">白棋</span>
+              <span id="white-status" class="seat-status">未加入</span>
+              <span id="white-you" class="you-tag hidden">你</span>
+            </div>
+          </div>
+
+          <div class="meta">
+            <span id="move-label">手数 0</span>
+            <span id="capture-label">提子 黑 0 / 白 0</span>
+            <span id="spectator-label" class="hidden">观战中</span>
+            <span id="komi-label" class="hidden"></span>
+          </div>
+
+          <div class="controls">
+            <button id="btn-pass">Pass</button>
+            <button id="btn-resign" class="danger">认输</button>
+            <button id="btn-restart" class="ghost">重开</button>
+          </div>
+
+          <button id="btn-swap" class="small ghost hidden">交换先后手</button>
+
+          <div id="result-label" class="result hidden"></div>
+        </div>
+      </section>
+
+      <div id="toast" class="toast hidden"></div>
+    </main>
+    <script src="./app.js"></script>
+  </body>
+</html>

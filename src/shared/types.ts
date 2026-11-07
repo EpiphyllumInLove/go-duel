@@ -1,6 +1,6 @@
-import type { Cell, ScoreResult, Stone } from './go';
+import type { Cell, MoveUndo, ScoreResult, Stone } from './go';
 
-export type { Cell, Stone, ScoreResult };
+export type { Cell, Stone, ScoreResult, MoveUndo };
 export type PlayerColor = Stone;
 export type GameStatus = 'waiting' | 'playing' | 'finished';
 
@@ -36,6 +36,26 @@ export interface MoveRecord {
   captures: number;
 }
 
+/** 待对手确认的悔棋申请 */
+export interface UndoRequest {
+  /** 申请方颜色 */
+  by: PlayerColor;
+  /** 回退手数：固定 1（保留字段便于将来扩展，服务端只接受 1） */
+  steps: number;
+  /** 申请时间戳，用于超时作废 */
+  at: number;
+}
+
+/** 悔棋栈条目：比纯函数所需字段多带了「这一手之前的局面快照」 */
+export interface UndoEntry extends MoveUndo {
+  /** 这一手之前的 koPoint，悔棋时精确恢复 */
+  prevKoPoint: number | null;
+  /** 这一手之前的 passCount */
+  prevPassCount: number;
+  /** 这一手之前的 lastMove */
+  prevLastMove: { x: number; y: number; color: Stone } | null;
+}
+
 export interface GameResult {
   winner: Stone | 'draw';
   reason: 'resign' | 'score';
@@ -56,6 +76,13 @@ export interface StoredRoomState {
   moveHistory: MoveRecord[];
   /** 总手数（不受 moveHistory 截断影响） */
   moveCount: number;
+  /**
+   * 悔棋栈：最多 3 条，栈顶是最后一手。
+   * 保存了恢复局面所需的提子信息与前一局面的快照，因此不随 moveHistory 裁剪。
+   */
+  undoStack: UndoEntry[];
+  /** 待确认的悔棋申请（双方都看得到，用于展示「等待对手同意」） */
+  undoRequest: UndoRequest | null;
   /** 各方累计提子数 */
   captures: { black: number; white: number };
   lastMove: { x: number; y: number; color: Stone } | null;
@@ -96,6 +123,12 @@ export interface PublicRoomState {
   koPoint: number | null;
   result: GameResult | null;
   restartRequest: PlayerColor | null;
+  /** 待确认的悔棋申请（观战者也能看到，但不含 token） */
+  undoRequest: UndoRequest | null;
+  /** 这条连接现在能不能悔一手：1 可以，0 不行（栈顶不是自己下的手也不行） */
+  undoAvailable: number;
+  /** 全局还剩几手可悔（栈深，上限 3） */
+  undoLeft: number;
   komi: number;
   /** 该连接自己的颜色；观战者为 null。每个接收者不同，所以逐条发送 */
   you: PlayerColor | null;
@@ -111,6 +144,10 @@ export type ClientMessage =
   | { type: 'pass' }
   | { type: 'resign' }
   | { type: 'restart' }
+  | { type: 'undoRequest'; steps?: number }
+  | { type: 'undoAccept' }
+  | { type: 'undoReject' }
+  | { type: 'undoCancel' }
   | { type: 'chooseColor'; color: PlayerColor }
   | { type: 'ping' };
 
@@ -123,6 +160,7 @@ export type ServerMessage =
     }
   | { type: 'state'; state: PublicRoomState }
   | { type: 'error'; message: string }
+  | { type: 'notice'; message: string }
   | { type: 'pong' };
 
 /** 挂在 WebSocket 上的身份信息（Hibernation 唤醒后仍可读） */

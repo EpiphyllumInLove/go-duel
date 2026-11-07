@@ -17,10 +17,16 @@ const IDS = [
   'btn-join',
   'btn-copy',
   'btn-pass',
+  'btn-undo',
   'btn-resign',
   'btn-restart',
   'btn-leave',
   'btn-swap',
+  'undo-panel',
+  'undo-text',
+  'btn-undo-accept',
+  'btn-undo-reject',
+  'btn-undo-cancel',
   'room-code',
   'turn-label',
   'black-status',
@@ -85,10 +91,14 @@ function boot() {
   });
 
   els['btn-pass'].addEventListener('click', () => send({ type: 'pass' }));
+  els['btn-undo'].addEventListener('click', requestUndo);
   els['btn-resign'].addEventListener('click', () => {
     if (window.confirm('确定认输？')) send({ type: 'resign' });
   });
   els['btn-restart'].addEventListener('click', () => send({ type: 'restart' }));
+  els['btn-undo-accept'].addEventListener('click', () => send({ type: 'undoAccept' }));
+  els['btn-undo-reject'].addEventListener('click', () => send({ type: 'undoReject' }));
+  els['btn-undo-cancel'].addEventListener('click', () => send({ type: 'undoCancel' }));
   els['btn-swap'].addEventListener('click', () => {
     const target = gameState && gameState.you === 'black' ? 'white' : 'black';
     send({ type: 'chooseColor', color: target });
@@ -226,6 +236,9 @@ function handleServerMessage(msg) {
     case 'error':
       toast(msg.message || '操作失败');
       break;
+    case 'notice':
+      toast(msg.message || '');
+      break;
     case 'pong':
       break;
     default:
@@ -326,6 +339,7 @@ function render() {
     setOverlay(null);
   }
 
+  // 结果
   if (g.result) {
     const winner = g.result.winner === 'draw' ? '和棋' : `${colorName(g.result.winner)}胜`;
     els['result-label'].textContent =
@@ -336,17 +350,75 @@ function render() {
     els['result-label'].classList.add('hidden');
   }
 
+  renderUndoPanel(g);
   updateControls(g);
   drawBoard(g);
+}
+
+/** 悔棋申请条：申请方显示「等待对手同意 + 撤回」，对手显示「同意 / 拒绝」 */
+function renderUndoPanel(g) {
+  const panel = els['undo-panel'];
+  const req = g.undoRequest || null;
+
+  if (!req) {
+    panel.classList.add('hidden');
+    return;
+  }
+
+  const mine = req.by === g.you;
+  els['undo-text'].textContent = mine
+    ? '你申请悔一手，等待对手同意…'
+    : '对手申请悔一手，是否同意？';
+
+  els['btn-undo-accept'].classList.toggle('hidden', mine);
+  els['btn-undo-reject'].classList.toggle('hidden', mine);
+  els['btn-undo-cancel'].classList.toggle('hidden', !mine);
+  // 观战者只看到文字
+  const spectator = g.you === null;
+  panel.classList.remove('hidden');
+  if (spectator) {
+    els['undo-text'].textContent = `${colorName(req.by)} 申请悔一手`;
+    els['btn-undo-accept'].classList.add('hidden');
+    els['btn-undo-reject'].classList.add('hidden');
+    els['btn-undo-cancel'].classList.add('hidden');
+  }
+}
+
+/** 点「悔棋」：申请回退一手，等待对手同意 */
+function requestUndo() {
+  const g = gameState;
+  if (!g) return;
+  if (g.you === null) {
+    toast('观战中，不能悔棋');
+    return;
+  }
+  if (g.undoRequest) {
+    toast(g.undoRequest.by === g.you ? '申请已发出，等对手同意' : '请先处理对手的悔棋申请');
+    return;
+  }
+  if (!g.undoAvailable) {
+    toast(g.undoLeft > 0 ? '最后一手不是你下的，不能悔' : '已经没有可悔的棋了');
+    return;
+  }
+  if (!window.confirm('确定悔一手？\n会向对手发送申请，需要对方同意。')) return;
+  send({ type: 'undoRequest', steps: 1 });
 }
 
 function updateControls(g) {
   const isPlayer = g.you !== null;
   const myTurn = g.status === 'playing' && isPlayer && g.you === g.currentTurn;
+  const pending = Boolean(g.undoRequest);
 
-  els['btn-pass'].disabled = !myTurn;
-  els['btn-resign'].disabled = !isPlayer || g.status !== 'playing';
-  els['btn-restart'].disabled = !isPlayer;
+  els['btn-pass'].disabled = !myTurn || pending;
+  els['btn-resign'].disabled = !isPlayer || g.status !== 'playing' || pending;
+  els['btn-restart'].disabled = !isPlayer || pending;
+
+  // 悔棋：只有「栈顶是自己的手」才能申请；申请挂起时禁用
+  const canUndo = isPlayer && !pending && Boolean(g.undoAvailable);
+  els['btn-undo'].disabled = !canUndo;
+  els['btn-undo'].textContent = '悔棋';
+  els['btn-undo'].title =
+    g.undoLeft > 0 ? `本局还剩 ${g.undoLeft} 手可悔` : '本局已无可悔的棋';
 
   els['btn-restart'].textContent =
     isPlayer && g.restartRequest && g.restartRequest !== g.you
@@ -511,6 +583,10 @@ function onCanvasClick(ev) {
   }
   if (g.currentTurn !== g.you) {
     toast('还没轮到你');
+    return;
+  }
+  if (g.undoRequest) {
+    toast(g.undoRequest.by === g.you ? '悔棋申请等待中' : '请先处理对手的悔棋申请');
     return;
   }
 

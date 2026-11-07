@@ -1,11 +1,14 @@
 import {
   DEFAULT_BOARD_SIZE,
   DEFAULT_KOMI,
+  canUndoBy,
   createBoard,
   isGameOverAfterPass,
   other,
   playMove,
   scoreChinese,
+  undoOne,
+  undoRemaining,
 } from './shared/go';
 import type { Stone } from './shared/go';
 import type {
@@ -16,6 +19,7 @@ import type {
   PublicRoomState,
   SocketAttachment,
   StoredRoomState,
+  UndoEntry,
 } from './shared/types';
 import { isValidRoomCode } from './shared/types';
 import type { Env } from './env';
@@ -27,6 +31,10 @@ const MAX_MESSAGE_BYTES = 2048;
 const MAX_TOKEN_LENGTH = 64;
 /** 广播给前端的最近手数上限（避免 DO storage 单值 128KB 限制） */
 const HISTORY_LIMIT = 60;
+/** 悔棋栈深度：最多 3 步，即全场最多悔 3 手（每次固定退 1 手） */
+const UNDO_STACK_LIMIT = 3;
+/** 悔棋申请有效期（毫秒）：超时自动作废，避免一方掉线卡死对局 */
+const UNDO_REQUEST_TTL_MS = 90_000;
 /** WebSocket.readyState 为 CLOSED 的数值（避免依赖常量名差异） */
 const WS_CLOSED = 3;
 
@@ -60,6 +68,8 @@ function createEmptyState(roomCode: string, boardSize: number): StoredRoomState 
     players: { black: null, white: null },
     moveHistory: [],
     moveCount: 0,
+    undoStack: [],
+    undoRequest: null,
     captures: { black: 0, white: 0 },
     lastMove: null,
     passCount: 0,
@@ -93,6 +103,9 @@ export class GameRoom implements DurableObject {
             : 0;
         }
         if (!Array.isArray(this.state.moveHistory)) this.state.moveHistory = [];
+        // 兼容旧存档：悔棋字段
+        if (!Array.isArray(this.state.undoStack)) this.state.undoStack = [];
+        if (this.state.undoRequest === undefined) this.state.undoRequest = null;
         // 连接标记不可信，重连时重新计算
         if (this.state.players.black) this.state.players.black.connected = false;
         if (this.state.players.white) this.state.players.white.connected = false;
@@ -176,6 +189,11 @@ export class GameRoom implements DurableObject {
     }
 
     const msg = data as unknown as ClientMessage;
+    // 先清理过期的悔棋申请，避免申请方掉线后整局被卡住
+    if (this.expireStaleUndo()) {
+      await this.persist();
+      this.broadcast();
+    }
     try {
       switch (msg.type) {
         case 'join':
@@ -192,6 +210,18 @@ export class GameRoom implements DurableObject {
           return;
         case 'restart':
           await this.handleRestart(ws);
+          return;
+        case 'undoRequest':
+          await this.handleUndoRequest(ws);
+          return;
+        case 'undoAccept':
+          await this.handleUndoAccept(ws);
+          return;
+        case 'undoReject':
+          await this.handleUndoReject(ws);
+          return;
+        case 'undoCancel':
+          await this.handleUndoCancel(ws);
           return;
         case 'chooseColor':
           await this.handleChooseColor(ws, data);
@@ -333,6 +363,10 @@ export class GameRoom implements DurableObject {
       this.sendError(ws, '还没轮到你');
       return;
     }
+    if (s.undoRequest) {
+      this.sendError(ws, '请先处理悔棋申请');
+      return;
+    }
 
     const x = data['x'];
     const y = data['y'];
@@ -352,12 +386,26 @@ export class GameRoom implements DurableObject {
       return;
     }
 
+    // 记录悔棋所需信息（在改状态之前抓快照）
+    this.pushUndoEntry({
+      color,
+      x,
+      y,
+      pass: false,
+      captured: res.capturedPoints,
+      moveNumber: s.moveCount + 1,
+      prevKoPoint: s.koPoint,
+      prevPassCount: s.passCount,
+      prevLastMove: s.lastMove,
+    });
+
     s.board = res.board;
     s.captures[color] += res.captures;
     s.koPoint = res.koPoint;
     s.passCount = 0;
     s.lastMove = { x, y, color };
     s.restartRequest = null;
+    s.undoRequest = null;
     this.pushMove({
       moveNumber: s.moveCount + 1,
       color,
@@ -391,11 +439,32 @@ export class GameRoom implements DurableObject {
       this.sendError(ws, '还没轮到你');
       return;
     }
+    if (s.undoRequest) {
+      this.sendError(ws, '请先处理悔棋申请');
+      return;
+    }
+
+    // 先抓快照，再改状态
+    const prevKoPoint = s.koPoint;
+    const prevPassCount = s.passCount;
+    const prevLastMove = s.lastMove;
 
     s.passCount += 1;
     s.koPoint = null;
     s.lastMove = null;
     s.restartRequest = null;
+    s.undoRequest = null;
+    this.pushUndoEntry({
+      color,
+      x: -1,
+      y: -1,
+      pass: true,
+      captured: [],
+      moveNumber: s.moveCount + 1,
+      prevKoPoint,
+      prevPassCount,
+      prevLastMove,
+    });
     this.pushMove({
       moveNumber: s.moveCount + 1,
       color,
@@ -433,6 +502,10 @@ export class GameRoom implements DurableObject {
       this.sendError(ws, '对局尚未开始');
       return;
     }
+    if (s.undoRequest) {
+      this.sendError(ws, '请先处理悔棋申请');
+      return;
+    }
     const score = scoreChinese(s.board, s.boardSize, s.komi);
     const winner: Stone = other(color);
     s.status = 'finished';
@@ -445,6 +518,7 @@ export class GameRoom implements DurableObject {
       detail: `${winner === 'black' ? '黑' : '白'}胜（对方认输）`,
     };
     s.restartRequest = null;
+    s.undoRequest = null;
     await this.persist();
     this.broadcast();
   }
@@ -460,6 +534,10 @@ export class GameRoom implements DurableObject {
       return;
     }
     const s = this.state;
+    if (s.undoRequest) {
+      this.sendError(ws, '请先处理悔棋申请');
+      return;
+    }
 
     // 还没落过子且未结束 → 无需重开
     if (s.moveCount === 0 && s.status !== 'finished') {
@@ -481,6 +559,191 @@ export class GameRoom implements DurableObject {
     s.restartRequest = s.restartRequest === color ? null : color;
     await this.persist();
     this.broadcast();
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* 操作：悔棋（需对手同意）                                         */
+  /* ---------------------------------------------------------------- */
+
+  /** 悔棋栈加一条，超出 UNDO_STACK_LIMIT 时丢弃最旧的 */
+  private pushUndoEntry(entry: UndoEntry): void {
+    const s = this.state;
+    s.undoStack.push(entry);
+    if (s.undoStack.length > UNDO_STACK_LIMIT) {
+      s.undoStack.splice(0, s.undoStack.length - UNDO_STACK_LIMIT);
+    }
+  }
+
+  /** 悔棋申请超时自动作废（挂起期间整局不能落子，必须能自愈）。返回是否有变化 */
+  private expireStaleUndo(): boolean {
+    const s = this.state;
+    if (!s.undoRequest) return false;
+    if (Date.now() - s.undoRequest.at <= UNDO_REQUEST_TTL_MS) return false;
+    const expiredBy = s.undoRequest.by;
+    s.undoRequest = null;
+    this.notifyColor(expiredBy, '悔棋申请已超时作废');
+    this.notifyColor(other(expiredBy), '对手的悔棋申请已超时作废');
+    return true;
+  }
+
+  /** 当前这个颜色能否悔棋（0 = 不能；1 = 可以悔一手）；栈顶不是他的手就不行 */
+  private undoCapacity(color: PlayerColor): number {
+    const s = this.state;
+    if (!this.canUndoNow()) return 0;
+    return canUndoBy(s.undoStack, color) ? 1 : 0;
+  }
+
+  /** 本局还剩多少手可悔（栈深，最多 3） */
+  private undoLeft(): number {
+    const s = this.state;
+    if (!this.canUndoNow()) return 0;
+    return undoRemaining(s.undoStack);
+  }
+
+  /**
+   * 是否处于可悔棋的状态：
+   * - 对局进行中
+   * - 或「数子终局」（连续两次 Pass），允许回退误触的 Pass
+   * - 认输终局不允许悔棋（那是明确决定）
+   */
+  private canUndoNow(): boolean {
+    const s = this.state;
+    if (s.status === 'playing') return true;
+    if (s.status === 'finished' && s.result?.reason === 'score') return true;
+    return false;
+  }
+
+  private async handleUndoRequest(ws: WebSocket): Promise<void> {
+    const { color } = this.attachment(ws);
+    if (!color) {
+      this.sendError(ws, '观战者不能悔棋');
+      return;
+    }
+    const s = this.state;
+    if (!this.canUndoNow()) {
+      this.sendError(ws, s.status === 'finished' ? '已认输结束，不能悔棋' : '当前不能悔棋');
+      return;
+    }
+    if (s.undoRequest) {
+      this.sendError(
+        ws,
+        s.undoRequest.by === color ? '已经发出悔棋申请，等对手回应' : '请先处理对手的悔棋申请',
+      );
+      return;
+    }
+
+    if (!canUndoBy(s.undoStack, color)) {
+      this.sendError(
+        ws,
+        s.undoStack.length === 0 ? '已经没有可悔的棋了' : '最后一手不是你下的，不能悔',
+      );
+      return;
+    }
+
+    s.undoRequest = { by: color, steps: 1, at: Date.now() };
+    await this.persist();
+    this.broadcast();
+    const rival: PlayerColor = other(color);
+    this.notifyColor(rival, '对手申请悔一手，请回应');
+  }
+
+  private async handleUndoAccept(ws: WebSocket): Promise<void> {
+    const { color } = this.attachment(ws);
+    if (!color) {
+      this.sendError(ws, '观战者不能确认悔棋');
+      return;
+    }
+    const s = this.state;
+    const req = s.undoRequest;
+    if (!req) {
+      this.sendError(ws, '没有待确认的悔棋申请');
+      return;
+    }
+    if (req.by === color) {
+      this.sendError(ws, '不能同意自己的申请');
+      return;
+    }
+    if (!this.canUndoNow()) {
+      this.sendError(ws, '当前不能悔棋');
+      return;
+    }
+    // 申请方可能在等待期间失去资格（理论上不会，因为等待期间无法落子）
+    if (!canUndoBy(s.undoStack, req.by)) {
+      s.undoRequest = null;
+      await this.persist();
+      this.sendError(ws, '悔棋申请已失效');
+      this.broadcast();
+      return;
+    }
+
+    this.applyUndo();
+    s.undoRequest = null;
+    // 悔棋后重新申请重开的状态作废
+    s.restartRequest = null;
+    await this.persist();
+    this.broadcast();
+    this.notifyColor(req.by, '对手已同意悔棋，请重新落子');
+  }
+
+  private async handleUndoReject(ws: WebSocket): Promise<void> {
+    const { color } = this.attachment(ws);
+    if (!color) return;
+    const s = this.state;
+    const req = s.undoRequest;
+    if (!req) return;
+    if (req.by === color) {
+      this.sendError(ws, '不能拒绝自己的申请');
+      return;
+    }
+    s.undoRequest = null;
+    await this.persist();
+    this.broadcast();
+    this.notifyColor(req.by, '对手拒绝了悔棋申请');
+  }
+
+  private async handleUndoCancel(ws: WebSocket): Promise<void> {
+    const { color } = this.attachment(ws);
+    if (!color) return;
+    const s = this.state;
+    const req = s.undoRequest;
+    if (!req || req.by !== color) {
+      this.sendError(ws, '没有你发出的悔棋申请');
+      return;
+    }
+    s.undoRequest = null;
+    await this.persist();
+    this.broadcast();
+  }
+
+  /**
+   * 真正回退一手。调用前必须已用 canUndoBy 校验。
+   * 恢复棋盘与 koPoint / passCount / lastMove 快照。
+   */
+  private applyUndo(): void {
+    const s = this.state;
+    const entry = s.undoStack.pop();
+    if (!entry) return;
+
+    s.board = undoOne(s.board, s.boardSize, entry);
+    s.koPoint = entry.prevKoPoint;
+    s.passCount = entry.prevPassCount;
+    s.lastMove = entry.prevLastMove;
+    if (entry.captured.length > 0) {
+      s.captures[entry.color] = Math.max(
+        0,
+        s.captures[entry.color] - entry.captured.length,
+      );
+    }
+
+    // 手数回退
+    s.moveCount = Math.max(0, s.moveCount - 1);
+    if (s.moveHistory.length > 0) s.moveHistory.pop();
+
+    // 被撤销的这手是 entry.color 下的，所以又轮到他重下
+    s.currentTurn = entry.color;
+    s.result = null;
+    s.undoRequest = null;
+    s.status = s.players.black && s.players.white ? 'playing' : 'waiting';
   }
 
   /* ---------------------------------------------------------------- */
@@ -561,6 +824,8 @@ export class GameRoom implements DurableObject {
     s.currentTurn = 'black';
     s.moveHistory = [];
     s.moveCount = 0;
+    s.undoStack = [];
+    s.undoRequest = null;
     s.captures = { black: 0, white: 0 };
     s.lastMove = null;
     s.passCount = 0;
@@ -647,6 +912,9 @@ export class GameRoom implements DurableObject {
       koPoint: s.koPoint,
       result: s.result,
       restartRequest: s.restartRequest,
+      undoRequest: s.undoRequest,
+      undoAvailable: viewer ? this.undoCapacity(viewer) : 0,
+      undoLeft: this.undoLeft(),
       komi: s.komi,
       you: viewer,
     };
@@ -676,5 +944,15 @@ export class GameRoom implements DurableObject {
 
   private sendError(ws: WebSocket, message: string): void {
     this.send(ws, { type: 'error', message });
+  }
+
+  /** 给某个颜色的所有连接推一条提示（不落盘） */
+  private notifyColor(color: PlayerColor, message: string): void {
+    for (const ws of this.ctx.getWebSockets()) {
+      if (!isAlive(ws)) continue;
+      if (this.attachment(ws).color === color) {
+        this.send(ws, { type: 'notice', message });
+      }
+    }
   }
 }

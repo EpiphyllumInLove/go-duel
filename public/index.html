@@ -78,8 +78,19 @@
 
           <div class="controls">
             <button id="btn-pass">Pass</button>
+            <button id="btn-undo">悔棋</button>
             <button id="btn-resign" class="danger">认输</button>
             <button id="btn-restart" class="ghost">重开</button>
+          </div>
+
+          <!-- 悔棋申请：等待对手同意 / 需要我方回应 -->
+          <div id="undo-panel" class="undo-panel hidden">
+            <div id="undo-text" class="undo-text"></div>
+            <div class="undo-actions">
+              <button id="btn-undo-accept" class="small primary">同意</button>
+              <button id="btn-undo-reject" class="small">拒绝</button>
+              <button id="btn-undo-cancel" class="small ghost">撤回</button>
+            </div>
           </div>
 
           <button id="btn-swap" class="small ghost hidden">交换先后手</button>

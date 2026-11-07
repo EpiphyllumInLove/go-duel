@@ -18,6 +18,7 @@
 | 断线重连 | 首次加入服务端下发 `playerToken`，前端存 `localStorage`，刷新/断网自动恢复座位，并顶掉旧连接 |
 | 规则 | 落子合法性、自动提子、自杀禁着、简单劫（`koPoint`）、Pass、连续两次 Pass 终局 |
 | 计分 | 简化中国规则数子法（盘面棋子 + 单色围空），白方加贴目（默认 7.5） |
+| 悔棋 | 每悔一次固定退一手，需对手同意；栈保留最近 3 手，故 A 悔 → B 悔 → A 悔 后就不能再悔 |
 | 其它操作 | 认输、双方确认重开（`restart`） |
 | 界面 | Canvas 棋盘、最后一步标记、提子数、手数、双方在线状态、观战提示、复制链接 |
 | 持久化 | 关键状态写入 DO storage，实例回收后可恢复 |
@@ -80,6 +81,7 @@ npm run test        # vitest，规则引擎用例
 - 简单劫：形成 → 立即回提被拒 → 异地落子后解除
 - 连续两次 Pass 终局
 - 中国数子法计分（含贴目影响胜负）
+- 悔棋：撤销普通落子 / 撤销带提子的落子（被提子放回）/ 撤销 Pass / 只有栈顶执子方可悔 / A 悔 → B 悔 → A 悔 的交替流程 / 三次后栈空谁都不能悔 / 连悔三次精确还原
 
 ---
 
@@ -140,6 +142,10 @@ export const DEFAULT_KOMI = 7.5;      // ← 9 路常用 5.5~7，13 路常用 7.
 { "type": "pass" }
 { "type": "resign" }
 { "type": "restart" }                       // 双方各按一次才真正重开
+{ "type": "undoRequest", "steps": 1 }        // 申请悔一手，steps 固定为 1
+{ "type": "undoAccept" }                     // 对手同意 → 回退一手
+{ "type": "undoReject" }                     // 对手拒绝
+{ "type": "undoCancel" }                     // 申请方撤回自己的申请
 { "type": "chooseColor", "color": "white" }  // 未落子前交换先后手
 { "type": "ping" }
 ```
@@ -150,6 +156,7 @@ export const DEFAULT_KOMI = 7.5;      // ← 9 路常用 5.5~7，13 路常用 7.
 { "type": "joined", "roomCode": "ABC123", "playerToken": "uuid 或 null", "color": "black" }
 { "type": "state", "state": { /* PublicRoomState，字段含 you */ } }
 { "type": "error", "message": "还没轮到你" }
+{ "type": "notice", "message": "对手申请悔 1 手，请回应" }   // 仅推给相关一方
 { "type": "pong" }
 ```
 
@@ -161,14 +168,82 @@ export const DEFAULT_KOMI = 7.5;      // ← 9 路常用 5.5~7，13 路常用 7.
   players: { black: { joined, connected }, white: { joined, connected } },
   spectatorCount, moveNumber, moveHistory,
   captures: { black, white }, lastMove, passCount, koPoint,
-  result, restartRequest, komi,
+  result, restartRequest,
+  undoRequest: { by, steps: 1, at } | null,  // 待确认的悔棋申请
+  undoAvailable: 0 | 1,                    // 这条连接此刻能否悔一手（栈顶不是自己下的手就是 0）
+  undoLeft: number,                        // 本局还剩几手可悔（栈深，上限 3）
+  komi,
   you: 'black' | 'white' | null   // 该连接自己的颜色，观战者为 null
 }
 ```
 
 ---
 
-## 8. 安全与健壮性
+## 8. 悔棋（undo）机制
+
+手机端误触很常见，所以悔棋设计成「申请 + 对手同意」的柔性流程。
+
+### 规则
+
+| 项目 | 规则 |
+| --- | --- |
+| 谁可以申请 | 只有对局双方；观战者不行 |
+| 何时可以申请 | `status = playing`；或连续两次 Pass 的**数子终局**（可回退误触的 Pass）。**认输结束不允许悔棋** |
+| 每次悔几手 | **固定 1 手**（不接受其它步数） |
+| 谁能悔 | **栈顶那一手是谁下的，就只有他能悔** |
+| 总次数上限 | 栈深 `UNDO_STACK_LIMIT = 3`，所以全场最多悔 3 次 |
+| 典型节奏 | A 悔 → B 悔 → A 悔 → 栈空，此后谁都不能悔 |
+| 悔完之后 | 轮次回到「被撤销那手的执子方」重下 |
+| 并发保护 | 有申请挂起时，双方都不能落子 / PASS / 认输 / 重开，必须先同意、拒绝或撤回 |
+| 超时自愈 | 申请 90 秒未回应自动作废（`UNDO_REQUEST_TTL_MS`），避免一方掉线把整局卡死 |
+
+> 为什么"只有栈顶那手的执子方"能悔：这样悔棋天然交替，也防止一方连续两次退掉对方的棋。
+> 注意这里只看「栈顶归属」，不看 `currentTurn`——悔完轮到自己重下，但对方接着悔自己的那手也是允许的。
+
+### 流程
+
+```
+A 落子 A1 → 白落 B2 → 黑落 A3       栈 = [A1(黑), B2(白), A3(黑)]
+
+A 点「悔棋」
+  → 服务端 canUndoBy(stack, 'black')：栈顶 A3 是黑 → 通过
+  → 写入 undoRequest {by:'black', steps:1} → 广播
+  → B 看到「对手申请悔一手，是否同意？」→ 同意
+  → applyUndo()：弹出 A3，棋盘/提子/koPoint 全部还原，currentTurn = 黑
+  → 栈 = [A1(黑), B2(白)]
+
+B 点「悔棋」（此时栈顶 B2 是白，允许）
+  → A 同意 → 弹出 B2，currentTurn = 白，栈 = [A1(黑)]
+
+A 再点「悔棋」（栈顶 A1 是黑，允许）
+  → B 同意 → 弹出 A1，currentTurn = 黑，栈 = []
+
+此后 undoRemaining = 0，双方都悔不了；再落子会重新填充栈（最多留 3 条）。
+```
+
+### 为什么能精确还原
+
+每一手落子/Pass 时都会压入一条 `UndoEntry`：
+
+```ts
+{
+  color, x, y, pass,          // 这手是什么
+  captured: number[],         // 这手提掉了哪些点（悔棋时原样放回对方棋子）
+  prevKoPoint, prevPassCount, prevLastMove   // 这手之前的局面快照
+}
+```
+
+`undoOne()` 做两件事：删掉这手落下的棋子、把 `captured` 里的点恢复成对方颜色。因此**带提子的手也能完美回退**，连续悔三次跨过提子也不会错。
+
+### 与 `moveHistory` 的关系
+
+- `moveHistory`（最多 60 条）只用于展示，会被裁剪。
+- `undoStack`（最多 3 条）保存了还原所需的完整信息，**不随 `moveHistory` 裁剪**。
+- `moveCount` 是总手数，悔棋时同步减。
+
+---
+
+## 9. 安全与健壮性
 
 - **token 不外泄**：`PublicRoomState` 完全不含 `playerToken`；token 只在 `joined` 中单独返回给本人。
 - **消息上限**：单条消息 2KB（`MAX_MESSAGE_BYTES`），`playerToken` 最长 64 字符。
@@ -180,7 +255,7 @@ export const DEFAULT_KOMI = 7.5;      // ← 9 路常用 5.5~7，13 路常用 7.
 
 ---
 
-## 9. WebSocket Hibernation 实现要点
+## 10. WebSocket Hibernation 实现要点
 
 用的是 **Hibernation API**（不是 `addEventListener`），实例休眠唤醒后仍能读取连接上挂的身份：
 
@@ -207,7 +282,7 @@ async webSocketError(ws, err) { this.broadcast(); }
 
 ---
 
-## 10. 规则实现说明
+## 11. 规则实现说明
 
 `src/shared/go.ts` 全部是纯函数，棋盘为一维数组 `index = y * size + x`：
 
@@ -226,7 +301,7 @@ async webSocketError(ws, err) { this.broadcast(); }
 
 ---
 
-## 11. 常见问题
+## 12. 常见问题
 
 **Q: 本地启动后 WebSocket 连不上？**
 确认访问的是 `http://localhost:8787` 而不是直接打开 `public/index.html` 文件（`file://` 无法连接 `/ws`）。

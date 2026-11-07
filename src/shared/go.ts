@@ -179,6 +179,61 @@ export function isGameOverAfterPass(passCount: number): boolean {
   return passCount >= 2;
 }
 
+/* ------------------------------------------------------------------ */
+/* 悔棋（undo）                                                        */
+/* ------------------------------------------------------------------ */
+
+/** 一手棋的悔棋所需最小信息（不含恢复局面之外的服务端字段） */
+export interface MoveUndo {
+  color: Stone;
+  /** pass 时为 -1 */
+  x: number;
+  y: number;
+  pass: boolean;
+  /** 这一手提掉的对方棋子下标（悔棋时要原样放回） */
+  captured: number[];
+  /** 这一手的总手数编号，用于同步裁剪展示历史 */
+  moveNumber: number;
+}
+
+/**
+ * 撤销一手：删除刚落下的棋子，并把被提掉的对方棋子放回原位。
+ * 返回新棋盘，不修改原棋盘。
+ */
+export function undoOne(board: readonly Cell[], size: number, entry: MoveUndo): Cell[] {
+  const next = board.slice() as Cell[];
+  if (!entry.pass) {
+    const p = idx(size, entry.x, entry.y);
+    if (p >= 0 && p < next.length) next[p] = null;
+  }
+  for (const raw of entry.captured) {
+    if (raw >= 0 && raw < next.length) next[raw] = other(entry.color);
+  }
+  return next;
+}
+
+/**
+ * 你能否悔棋：栈顶必须是「你自己刚下的那一手」。
+ *
+ * 这样悔棋天然是交替的：
+ *   局面 [A1, B2, A3]
+ *   A 悔 → 退掉 A3，剩 [A1, B2]（轮到 A 重下）
+ *   B 悔 → 退掉 B2，剩 [A1]（轮到 B 重下）
+ *   A 悔 → 退掉 A1，剩 []（轮到 A 重下，此后谁都不能悔）
+ *
+ * 不要求「轮到你」才能申请：B 悔 B2 时轮到的是 B 重下，但逻辑上 B 也不是
+ * 「当前该落子的人」——所以这里只看栈顶归属，不看 currentTurn。
+ */
+export function canUndoBy(stack: readonly MoveUndo[], color: Stone): boolean {
+  if (stack.length === 0) return false;
+  return stack[stack.length - 1].color === color;
+}
+
+/** 当前栈里还剩几手可退（上限由 UNDO_STACK_LIMIT 控制） */
+export function undoRemaining(stack: readonly MoveUndo[]): number {
+  return stack.length;
+}
+
 export interface ScoreResult {
   black: number;
   white: number;
